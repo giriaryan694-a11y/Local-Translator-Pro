@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from pydub import AudioSegment
 import torchaudio
+from datetime import datetime
 
 loaded_mt_models = {}
 loaded_asr_model = None
@@ -21,6 +22,8 @@ LANG_CODE_MAP = {
     "polish": "pl", "spanish": "es", "italian": "it", "japanese": "ja",
     "korean": "ko", "arabic": "ar", "hindi": "hi"
 }
+
+HISTORY_FILE = "translation_history.txt"
 
 def get_lang_code(lang_name):
     code = LANG_CODE_MAP.get(lang_name.lower())
@@ -48,12 +51,15 @@ def translate_text(text, src_lang, tgt_lang):
         return "❌ Model not found for this language pair."
     inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(DEVICE)
     translated = model.generate(**inputs)
-    return tokenizer.decode(translated[0], skip_special_tokens=True)
+    result = tokenizer.decode(translated[0], skip_special_tokens=True)
+    save_translation_to_history(text, src_lang, tgt_lang, result)
+    return result
 
 def translate_image(image_path, src_lang, tgt_lang):
     try:
         text = pytesseract.image_to_string(Image.open(image_path))
-        return translate_text(text, src_lang, tgt_lang)
+        result = translate_text(text, src_lang, tgt_lang)
+        return result
     except Exception as e:
         return f"❌ Image Error: {str(e)}"
 
@@ -99,13 +105,44 @@ def translate_audio(mp3_path, tgt_lang):
         transcription = whisper_transcribe(mp3_path)
     else:
         transcription = pocketsphinx_transcribe(mp3_path)
-    return translate_text(transcription, "en", tgt_lang)
+    result = translate_text(transcription, "en", tgt_lang)
+    return result
+
+def search_and_install_language(lang_name):
+    lang_code = get_lang_code(lang_name)
+    try:
+        model_name = f"Helsinki-NLP/opus-mt-en-{lang_code}"
+        tokenizer = MarianTokenizer.from_pretrained(model_name)
+        model = MarianMTModel.from_pretrained(model_name).to(DEVICE)
+        loaded_mt_models[f"en-{lang_code}"] = (tokenizer, model)
+        model_name_rev = f"Helsinki-NLP/opus-mt-{lang_code}-en"
+        tokenizer_rev = MarianTokenizer.from_pretrained(model_name_rev)
+        model_rev = MarianMTModel.from_pretrained(model_name_rev).to(DEVICE)
+        loaded_mt_models[f"{lang_code}-en"] = (tokenizer_rev, model_rev)
+        return True
+    except Exception:
+        return False
+
+def save_translation_to_history(original, src_lang, tgt_lang, translated):
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        f.write(f"[{timestamp}] {src_lang} -> {tgt_lang}\nOriginal: {original}\nTranslated: {translated}\n\n")
+
+def read_translation_history():
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+    return ""
+
+def clear_translation_history():
+    if os.path.exists(HISTORY_FILE):
+        os.remove(HISTORY_FILE)
 
 class TranslatorGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Local Translator Pro | Made by Aryan Giri")
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(100, 100, 850, 700)
         self.initUI()
 
     def initUI(self):
@@ -131,6 +168,15 @@ class TranslatorGUI(QWidget):
         self.audio_button = QPushButton("Select MP3 for Translation")
         self.audio_button.clicked.connect(self.translate_audio_action)
 
+        self.install_lang_button = QPushButton("Search & Install New Language")
+        self.install_lang_button.clicked.connect(self.install_language_action)
+
+        self.history_button = QPushButton("Show Translation History")
+        self.history_button.clicked.connect(self.show_history)
+
+        self.clear_history_button = QPushButton("Clear Translation History")
+        self.clear_history_button.clicked.connect(self.clear_history)
+
         self.asr_engine_combo = QComboBox()
         self.asr_engine_combo.addItems(["Whisper (accurate)", "Pocketsphinx (light)"])
         self.asr_engine_combo.currentIndexChanged.connect(self.select_asr_engine)
@@ -146,6 +192,9 @@ class TranslatorGUI(QWidget):
         layout.addWidget(self.result_output)
         layout.addWidget(self.image_button)
         layout.addWidget(self.audio_button)
+        layout.addWidget(self.install_lang_button)
+        layout.addWidget(self.history_button)
+        layout.addWidget(self.clear_history_button)
         layout.addWidget(QLabel("ASR Engine:"))
         layout.addWidget(self.asr_engine_combo)
 
@@ -181,6 +230,26 @@ class TranslatorGUI(QWidget):
         tgt = get_lang_code(self.tgt_lang_input.text())
         result = translate_audio(file_path, tgt)
         self.result_output.setText(result)
+
+    def install_language_action(self):
+        lang_name, ok = QFileDialog.getText(self, "Search & Install Language", "Enter language name (English):")
+        if not ok or not lang_name:
+            return
+        success = search_and_install_language(lang_name)
+        if success:
+            QMessageBox.information(self, "Success", f"✅ {lang_name} models installed (forward & reverse).")
+        else:
+            QMessageBox.warning(self, "Error", f"❌ Could not find model for {lang_name}.")
+
+    def show_history(self):
+        history = read_translation_history()
+        if not history:
+            history = "No translations yet."
+        QMessageBox.information(self, "Translation History", history)
+
+    def clear_history(self):
+        clear_translation_history()
+        QMessageBox.information(self, "Translation History", "✅ Translation history cleared.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
